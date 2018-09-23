@@ -1,7 +1,7 @@
 # -*- coding='utf-8' -*-
 
 op_code = {
-    'FIN' : 0x80,
+    'FIN' : 0x80, 1000 000
     'OPCODE' : 0x0f,
     'MASK' : 0x80,
     'PAYLOAD_LEN' : 0x7f, # 0111 1111

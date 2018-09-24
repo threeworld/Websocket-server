@@ -39,7 +39,7 @@ class WebSocketHandler(StreamRequestHandler):
     #读字节
     def read_bytes(self, num):
         bytes = self.rfile.read(num)
-        return map(ord, bytes)
+        return bytes
     
     #握手
     def handshake(self):
@@ -59,6 +59,7 @@ class WebSocketHandler(StreamRequestHandler):
         self.handshake_done = self.request.send(response.encode())
         self.valid_client = True
         self.server.new_client(self)
+        
     #握手响应
     def make_handshake_reponse(self, key):
         return \
@@ -78,30 +79,117 @@ class WebSocketHandler(StreamRequestHandler):
     #读消息
     def read_message(self):
         try:
-            b1, b2 = self.read_bytes(2)
+            b1, b2 = self.read_bytes(2)  # b1，b2分别对应客户端数据前两个字节
         except ValueError as e:
             b1, b2 = 0, 0
+        #通过&操作获取对应的bit    
         fin = op_code.get('FIN')
-        opcode = b1 & op_code.get('OPCODE')
+        opcode = b1 & op_code.get('OPCODE')  #断开opcode
         masked = b2 & op_code.get('MASKED')
-        playload_len = b2 & op_code.get('PLAYLOAD_LEN')
-        pass
+        payload_len = b2 & op_code.get('PAYLOAD_LEN')
         
+        if not b1:
+            logger.info('Client closed connection')
+            return
+        if opcode == op_code.get('OPCODE_CLOSE'):
+            logger.info('Client asked to close connection')
+            self.keep_alive = False
+            return 
+        #没有掩码处理
+        if not masked:
+            logger.error('Client must always be masked')
+            self.keep_alive = False
+            return
+        if opcode == op_code.get('OPCODE_CONTINUATION'):
+            logger.warn('Continuation frames are not supported.')
+            return 
+        if opcode == op_code.get('OPCODE_BINARY'):
+            logger.warn('Binary frames are not supported.')
+            return 
+        elif opcode == op_code.get('OPCODE_TEXT'):
+            opcode_handler = self.server.message_received
+        elif opcode == op_code.get('OPCODE_PING'):
+            opcode_handler = self.server.ping_received
+        elif opcode == op_code.get('OPCODE_PONG'):
+            logger.warn('pong frames are not supported. ')
+            return
+        else:
+            logger.warn("Unknown opcode %#x." + opcode)
+            self.keep_alive = False
+            return
+        
+        if payload_len == 126:
+            payload_len = struct.unpack('>H', self.rfile.read(2))[0]
+        elif payload_len == 127:
+            payload_len = struct.unpack('>Q', self.rfile.read(8))[0]    
+        
+        masks = self.read_bytes(4)
+        message_bytes = bytearray()
+        for message_byte in self.read_bytes(payload_len):
+            message_byte ^= masks[len(message_bytes) % 4]
+            message_bytes.append(message_byte)
+        opcode_handler(self, message_bytes.decode('utf8'))
+
     #发送消息
-    def send_message(self, message, op_code):
-        pass
+    def send_message(self, message):
+        self.send_text(message)
     
     def send_pong(self, message, op_code):
-        pass
+        self.send_text(message, op_code.get('OPCODE_PONG'))
     
-    def send_text(self, message):
-        pass
+    def send_text(self, message, opcode=op_code.get('OPCODE_TEXT')):
+        if isinstance(message, bytes):
+            message = decode_to_UTF8(message)
+            if not message:
+                logger.error('Can\'t send message, message is not valid UTF-8')
+                return False
+        elif isinstance(message, str):
+            pass
+        else:
+            logger.error('Can\'t send message, message has to be a string or bytes. Given type is %s' % type(message))
+            return
+        
+        header = bytearray()
+        payload = encode_to_UTF8(message)
+        payload_len = len(payload)
+
+        if payload_len <= 125:
+            header.append(op_code.get('FIN') | opcode)
+            header.append(payload_len)
+
+        elif payload_len > 125 and payload_len <= 65535:
+            header.append(op_code.get('FIN') | opcode)
+            header.append(op_code.get('pAYLOAD_LEN_EXT16'))
+            header.extend(struct.pack('>H', payload_len))
+
+        elif payload_len < 18446744073709551616:
+            header.append(op_code.get('FIN') | opcode)
+            header.append(op_code.get('pAYLOAD_LEN_EXT64'))
+            header.extend(struct.pack('>Q', payload_len))
+    
+        else:
+            raise Exception('Message is too big. Consider breaking it into chunks.')
+            return
+
+        self.request.send(header + payload)
     
     def finish(self):
-        pass
+        self.server.client_left(self)
         
 def encode_to_UTF8(data):
-    pass
+    try:
+        return data.encode('UTF-8')
+    except UnicodeEncodeError as e:
+        logger.error('Could not encode data to UTF-8 -- %s' % e)
+    except Exception as e:
+        raise(e)
+        return False
 
-def decode_UTF8(data):
-    pass
+def decode_to_UTF8(data):
+    try:
+        return data.decode('UTF-8')
+    except UnicodeEncodeError as e:
+        logger.error('Could not decode data to UTF-8 -- %s' % e)
+    except Exception as e:
+        raise(e)
+        return False
